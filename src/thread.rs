@@ -249,7 +249,8 @@ impl ThreadData {
                 formatted_score.push_str(" lowerbound");
             }
 
-            print!(
+            // Build the full info line then emit via the per-instance output sink.
+            let mut line = format!(
                 "info depth {depth} seldepth {} multipv {} score {formatted_score} nodes {} time {ms} nps {nps:.0} hashfull {} tbhits {} pv",
                 root_move.sel_depth,
                 pv_index + 1,
@@ -258,12 +259,14 @@ impl ThreadData {
                 self.shared.tb_hits.aggregate(),
             );
 
-            print!(" {}", root_move.mv.to_uci(&self.board));
+            line.push(' ');
+            line.push_str(&root_move.mv.to_uci(&self.board));
             for mv in root_move.pv.line() {
-                print!(" {}", mv.to_uci(&self.board));
+                line.push(' ');
+                line.push_str(&mv.to_uci(&self.board));
             }
 
-            println!();
+            crate::_uci_emit(&line);
         }
     }
 }

@@ -11,6 +11,7 @@ use crate::{
     tools,
     transposition::DEFAULT_TT_SIZE,
     types::{Color, MAX_MOVES, Move, Score, is_decisive, is_loss, is_win},
+    uci_out,
 };
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -37,15 +38,45 @@ impl Default for Settings {
     }
 }
 
-pub fn message_loop(mut buffer: VecDeque<String>) {
+/// Original entry point: reads commands from stdin via a spawned listener thread.
+/// This path is used by the binary (`main.rs`).  Output goes to stdout (via the
+/// `uci_out!` macro, which falls back to `println!` when no sink is installed).
+pub fn message_loop(buffer: VecDeque<String>) {
     let shared = Arc::new(SharedContext::default());
     let mut settings = Settings::default();
     let mut threads = ThreadPool::new(shared.clone());
 
     let rx = spawn_listener(shared.clone());
 
-    let mut mode = if buffer.is_empty() { Mode::Uci } else { Mode::Cli };
+    let mode = if buffer.is_empty() { Mode::Uci } else { Mode::Cli };
+    run_loop(buffer, rx, mode, &mut threads, &mut settings, &shared);
+}
 
+/// Per-instance I/O entry point: commands come from an injected channel `rx`.
+/// No stdin listener is spawned; no fd redirection is performed.
+/// Called by `reckless::run_io`.
+pub fn message_loop_with_channel(buffer: VecDeque<String>, rx: std::sync::mpsc::Receiver<String>) {
+    let shared = Arc::new(SharedContext::default());
+    let mut settings = Settings::default();
+    let mut threads = ThreadPool::new(shared.clone());
+
+    let mode = if buffer.is_empty() { Mode::Uci } else { Mode::Cli };
+    run_loop(buffer, rx, mode, &mut threads, &mut settings, &shared);
+}
+
+/// Core message loop, shared by both stdin and channel-based entry points.
+///
+/// `buffer` supplies pre-queued commands (CLI mode); `rx` supplies subsequent
+/// commands (UCI mode).  `mode` starts as `Cli` if the buffer is non-empty,
+/// `Uci` otherwise.  The loop switches to `Uci` when the `uci` command is seen.
+fn run_loop(
+    mut buffer: VecDeque<String>,
+    rx: std::sync::mpsc::Receiver<String>,
+    mut mode: Mode,
+    threads: &mut ThreadPool,
+    settings: &mut Settings,
+    shared: &Arc<SharedContext>,
+) {
     loop {
         let message = if let Some(cmd) = buffer.pop_front() {
             cmd
@@ -65,16 +96,15 @@ pub fn message_loop(mut buffer: VecDeque<String>) {
                 mode = Mode::Uci;
             }
 
-            ["isready"] => println!("readyok"),
+            ["isready"] => uci_out!("readyok"),
 
-            ["go", tokens @ ..] => go(&mut threads, &settings, &shared, tokens),
-            ["position", tokens @ ..] => position(&mut threads, &settings, tokens),
-            ["setoption", tokens @ ..] => set_option(&mut threads, &mut settings, &shared, tokens),
-            ["ucinewgame"] => reset(&mut threads, &shared),
+            ["go", tokens @ ..] => go(threads, settings, shared, tokens),
+            ["position", tokens @ ..] => position(threads, settings, tokens),
+            ["setoption", tokens @ ..] => set_option(threads, settings, shared, tokens),
+            ["ucinewgame"] => reset(threads, shared),
 
             ["stop"] => shared.status.set(Status::STOPPED),
             ["quit"] => {
-                drop(threads);
                 break;
             }
 
@@ -97,7 +127,6 @@ pub fn message_loop(mut buffer: VecDeque<String>) {
 
         // Auto-exit after last CLI command
         if matches!(mode, Mode::Cli) && buffer.is_empty() {
-            drop(threads);
             break;
         }
     }
@@ -118,7 +147,7 @@ fn spawn_listener(shared: Arc<SharedContext>) -> std::sync::mpsc::Receiver<Strin
             }
 
             match message.trim_end() {
-                "isready" => println!("readyok"),
+                "isready" => uci_out!("readyok"),
                 "stop" => shared.status.set(Status::STOPPED),
                 "quit" => {
                     shared.status.set(Status::STOPPED);
@@ -141,23 +170,23 @@ fn spawn_listener(shared: Arc<SharedContext>) -> std::sync::mpsc::Receiver<Strin
 }
 
 fn uci() {
-    println!("id name Reckless {}", env!("CARGO_PKG_VERSION"));
-    println!("id author Arseniy Surkov, Shahin M. Shahin, and Styx");
-    println!("option name Hash type spin default {DEFAULT_TT_SIZE} min 1 max 262144");
-    println!("option name Threads type spin default 1 min 1 max {}", ThreadPool::available_threads());
-    println!("option name MoveOverhead type spin default 100 min 0 max 2000");
-    println!("option name Minimal type check default false");
-    println!("option name Clear Hash type button");
-    println!("option name UCI_Chess960 type check default false");
-    println!("option name MultiPV type spin default 1 min 1 max {MAX_MOVES}");
+    uci_out!("id name Reckless {}", env!("CARGO_PKG_VERSION"));
+    uci_out!("id author Arseniy Surkov, Shahin M. Shahin, and Styx");
+    uci_out!("option name Hash type spin default {DEFAULT_TT_SIZE} min 1 max 262144");
+    uci_out!("option name Threads type spin default 1 min 1 max {}", ThreadPool::available_threads());
+    uci_out!("option name MoveOverhead type spin default 100 min 0 max 2000");
+    uci_out!("option name Minimal type check default false");
+    uci_out!("option name Clear Hash type button");
+    uci_out!("option name UCI_Chess960 type check default false");
+    uci_out!("option name MultiPV type spin default 1 min 1 max {MAX_MOVES}");
 
     #[cfg(feature = "syzygy")]
-    println!("option name SyzygyPath type string default");
+    uci_out!("option name SyzygyPath type string default");
 
     #[cfg(feature = "spsa")]
     crate::parameters::print_options();
 
-    println!("uciok");
+    uci_out!("uciok");
 }
 
 fn compiler() {
@@ -235,7 +264,7 @@ fn go(threads: &mut ThreadPool, settings: &Settings, shared: &Arc<SharedContext>
         threads[best].print_uci_info(threads[best].completed_depth);
     }
 
-    println!("bestmove {}", threads[best].root_moves[0].mv.to_uci(&threads.main_thread().board));
+    uci_out!("bestmove {}", threads[best].root_moves[0].mv.to_uci(&threads.main_thread().board));
     crate::misc::dbg_print();
 }
 
@@ -291,37 +320,37 @@ fn set_option(threads: &mut ThreadPool, settings: &mut Settings, shared: &Arc<Sh
         },
         ["name", "Clear", "Hash"] => {
             shared.tt.clear(threads.len());
-            println!("info string Hash cleared");
+            uci_out!("info string Hash cleared");
         }
         ["name", "Hash", "value", v] => {
             shared.tt.resize(threads.len(), v.parse().unwrap());
-            println!("info string set Hash to {v} MB");
+            uci_out!("info string set Hash to {v} MB");
         }
         ["name", "Threads", "value", v] => {
             threads.set_count(v.parse().unwrap());
-            println!("info string set Threads to {v}");
+            uci_out!("info string set Threads to {v}");
         }
         ["name", "MoveOverhead", "value", v] => {
             settings.move_overhead = v.parse().unwrap();
-            println!("info string set MoveOverhead to {v} ms");
+            uci_out!("info string set MoveOverhead to {v} ms");
         }
         #[cfg(feature = "syzygy")]
         ["name", "SyzygyPath", "value", v] => match crate::tb::initialize(v) {
-            Some(size) => println!("info string Loaded Syzygy tablebases with {size} pieces"),
+            Some(size) => uci_out!("info string Loaded Syzygy tablebases with {size} pieces"),
             None => eprintln!("Failed to load Syzygy tablebases"),
         },
         ["name", "UCI_Chess960", "value", v] => {
             settings.frc = v.parse().unwrap_or_default();
-            println!("info string set UCI_Chess960 to {v}");
+            uci_out!("info string set UCI_Chess960 to {v}");
         }
         ["name", "MultiPV", "value", v] => {
             settings.multi_pv = v.parse().unwrap_or_default();
-            println!("info string set MultiPV to {v}");
+            uci_out!("info string set MultiPV to {v}");
         }
         #[cfg(feature = "spsa")]
         ["name", name, "value", v] => {
             crate::parameters::set_parameter(name, v);
-            println!("info string set {name} to {v}");
+            uci_out!("info string set {name} to {v}");
         }
         _ => eprintln!("Unknown option: '{}'", tokens.join(" ").trim_end()),
     }
@@ -333,7 +362,7 @@ fn eval(td: &mut ThreadData) {
         Color::White => td.nnue.evaluate(&td.board),
         Color::Black => -td.nnue.evaluate(&td.board),
     };
-    println!("{eval}");
+    uci_out!("{eval}");
 }
 
 fn parse_limits(color: Color, tokens: &[&str]) -> Limits {
