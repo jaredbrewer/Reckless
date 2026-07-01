@@ -2,7 +2,7 @@ use std::{
     env,
     fs::File,
     io::{BufWriter, Write},
-    path::{Path, PathBuf},
+    path::Path,
     process::Command,
 };
 
@@ -10,11 +10,10 @@ mod attacks;
 mod magics;
 mod maps;
 
-const BASE_URL: &str = "https://github.com/codedeliveryservice/RecklessNetworks/releases/download/networks";
-const NETWORK_NAME: &str = "v54-5478683c.nnue";
-
 fn main() {
-    generate_model_env();
+    // NOTE: generate_model_env() and the network download have been removed.
+    // The NNUE net is no longer baked at compile time (no include_bytes!/MODEL).
+    // It is loaded at runtime via reckless::nnue::load_network() — see ffi.rs.
     generate_attack_maps();
     generate_compiler_info();
     generate_engine_version();
@@ -22,14 +21,8 @@ fn main() {
     #[cfg(feature = "syzygy")]
     generate_syzygy_binding();
 
-    if !Path::new("networks").join(NETWORK_NAME).exists() && env::var("EVALFILE").is_err() {
-        download_network();
-    }
-
-    println!("cargo:rerun-if-env-changed=EVALFILE");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/logs/HEAD");
-    println!("cargo:rerun-if-changed=networks/{NETWORK_NAME}");
 }
 
 #[cfg(feature = "syzygy")]
@@ -51,16 +44,6 @@ fn generate_syzygy_binding() {
         .expect("Failed to generate Fathom bindings")
         .write_to_file("src/bindings.rs")
         .unwrap();
-}
-
-fn generate_model_env() {
-    let mut path = env::var("EVALFILE").map(PathBuf::from).unwrap_or_else(|_| Path::new("networks").join(NETWORK_NAME));
-
-    if path.is_relative() {
-        path = Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
-    }
-
-    println!("cargo:rustc-env=MODEL={}", path.display());
 }
 
 fn generate_attack_maps() {
@@ -90,21 +73,6 @@ fn write(mut buf: BufWriter<File>) -> Result<(), std::io::Error> {
     write_map!("BISHOP_MAGICS", "MagicEntry", magics::BISHOP_MAGICS);
 
     writeln!(buf, "struct MagicEntry {{ pub mask: u64, pub magic: u64, pub shift: u32, pub offset: u32 }}")
-}
-
-fn download_network() {
-    let response = Command::new("curl")
-        .arg("-sfL")
-        .arg(format!("{BASE_URL}/{NETWORK_NAME}"))
-        .output()
-        .expect("Failed to execute `curl` to download network");
-
-    if response.status.success() {
-        std::fs::create_dir_all("networks").unwrap();
-        std::fs::write(format!("networks/{NETWORK_NAME}"), response.stdout).unwrap();
-    } else {
-        panic!("Failed to download the network");
-    }
 }
 
 fn generate_compiler_info() {

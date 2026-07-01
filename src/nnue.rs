@@ -292,7 +292,82 @@ struct Parameters {
     l3_biases: Aligned<[f32; OUTPUT_BUCKETS]>,
 }
 
-static PARAMETERS: Parameters = unsafe { std::mem::transmute(*include_bytes!(env!("MODEL"))) };
+// ── Runtime NNUE net holder ───────────────────────────────────────────────────
+//
+// Previously the net was baked at compile time via:
+//   static PARAMETERS: Parameters = unsafe { transmute(*include_bytes!(env!("MODEL"))) };
+//
+// Now we load it at runtime from a caller-supplied byte slice so the binary
+// ships without the ~60 MB net blob (SPI-distributable, downloaded on first run).
+//
+// The NetHolder Derefs to Parameters, so all ~36 field access sites
+// (PARAMETERS.ft_piece_weights, PARAMETERS.l1_weights, etc.) compile unchanged.
+
+struct NetHolder(std::sync::OnceLock<&'static Parameters>);
+
+impl std::ops::Deref for NetHolder {
+    type Target = Parameters;
+    #[inline]
+    fn deref(&self) -> &Parameters {
+        self.0.get().expect("NNUE net not loaded — call rk_ffi_create with a valid network_path")
+    }
+}
+
+// SAFETY: NetHolder only ever holds an immutable &'static Parameters (created
+// by Box::leak) wrapped in OnceLock.  OnceLock is already Sync; the raw
+// &'static reference is Sync because Parameters is #[repr(C)] with no interior
+// mutability.
+unsafe impl Sync for NetHolder {}
+
+static PARAMETERS: NetHolder = NetHolder(std::sync::OnceLock::new());
+
+/// Load the NNUE net from a raw byte slice.
+///
+/// Must be called once before any evaluation.  The bytes must be exactly
+/// `size_of::<Parameters>()` bytes long and must contain a valid Reckless net.
+///
+/// Returns `Ok(())` on success, `Err(String)` on failure (wrong size or already
+/// loaded).
+pub fn load_network(bytes: &[u8]) -> Result<(), String> {
+    let want = std::mem::size_of::<Parameters>();
+    if bytes.len() != want {
+        return Err(format!(
+            "NNUE net size mismatch: got {} bytes, want {want}",
+            bytes.len()
+        ));
+    }
+    // Allocate on the heap directly via the global allocator.
+    //
+    // We CANNOT use Box::new(MaybeUninit::uninit()) for a ~60 MB struct:
+    // the MaybeUninit value would be created on the stack first, causing an
+    // immediate stack overflow.  Instead we call alloc() directly so the memory
+    // lives on the heap from the start.
+    //
+    // SAFETY:
+    //  - Parameters is #[repr(C)] so its layout is deterministic.
+    //  - The net file byte layout == size_of::<Parameters>() by construction
+    //    (same guarantee that made the include_bytes transmute safe upstream).
+    //  - alloc() returns a properly aligned pointer (align_of::<Parameters>() = 64).
+    //  - copy_nonoverlapping initialises every byte before we call assume_init.
+    //  - Box::from_raw + Box::leak gives us a &'static Parameters.
+    let layout = std::alloc::Layout::new::<Parameters>();
+    let ptr = unsafe { std::alloc::alloc(layout) } as *mut std::mem::MaybeUninit<Parameters>;
+    if ptr.is_null() {
+        return Err(format!(
+            "failed to allocate {} bytes for NNUE net",
+            layout.size()
+        ));
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, want);
+    }
+    // All bytes are initialised; cast to the concrete type.
+    let boxed: Box<Parameters> = unsafe { Box::from_raw(ptr as *mut Parameters) };
+    PARAMETERS
+        .0
+        .set(Box::leak(boxed))
+        .map_err(|_| "NNUE net already loaded".to_string())
+}
 
 #[repr(align(64))]
 #[derive(Clone)]
