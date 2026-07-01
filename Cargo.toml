@@ -5,8 +5,20 @@ edition = "2024"
 build = "build/build.rs"
 publish = false
 
+[lib]
+name = "reckless"
+# rlib is the default crate-type; explicit here for clarity.
+crate-type = ["rlib"]
+
+[[bin]]
+name = "reckless"
+path = "src/main.rs"
+
 [features]
-default = ["syzygy"]
+# Disable syzygy by default for the vendored lib build to avoid needing
+# bindgen / clang as build-time dependencies.  Enable explicitly if TB support
+# is needed.
+default = []
 syzygy = []
 numa = []
 spsa = []
@@ -22,8 +34,10 @@ panic = "abort"
 codegen-units = 1
 
 [build-dependencies]
-cc = "1.2.19"
-bindgen = "0.71.1"
+# cc and bindgen are only needed when the syzygy feature is enabled.
+# They are kept as optional to avoid unnecessary build-time deps when syzygy is off.
+# cc = "1.2.19"
+# bindgen = "0.71.1"
 
 [dependencies]
 libc = "0.2.175"
