@@ -215,6 +215,15 @@ fn go(threads: &mut ThreadPool, settings: &Settings, shared: &Arc<SharedContext>
     threads.main_thread().multi_pv = settings.multi_pv;
     threads.execute_searches(time_manager, settings.report, shared);
 
+    // Terminal position (no legal moves): every thread's root_moves is empty
+    // (search::start returned immediately). Emit a null bestmove instead of
+    // indexing root_moves[0] below. (terminal-position guard)
+    if threads.main_thread().root_moves.is_empty() {
+        uci_out!("bestmove (none)");
+        crate::misc::dbg_print();
+        return;
+    }
+
     let min_score = threads.iter().map(|v| v.root_moves[0].score).min().unwrap();
     let vote_value = |td: &ThreadData| (td.root_moves[0].score - min_score + 10) * td.completed_depth;
 

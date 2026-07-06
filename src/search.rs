@@ -65,6 +65,15 @@ pub fn start(td: &mut ThreadData, report: Report, thread_count: usize) {
         .map(|v| RootMove { mv: v.mv, ..Default::default() })
         .collect();
 
+    // No legal moves (checkmate / stalemate) or an empty/unset board: there is
+    // nothing to search. Return immediately so the iterative-deepening loop below
+    // never indexes an empty td.root_moves[0] (which SIGABRTs). go() detects the
+    // empty root_moves and emits "bestmove (none)". (terminal-position guard)
+    if td.root_moves.is_empty() {
+        td.completed_depth = 0;
+        return;
+    }
+
     td.root_in_tb = false;
     td.stop_probing_tb = false;
 
