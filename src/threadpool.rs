@@ -70,12 +70,25 @@ impl ThreadPool {
     }
 
     pub fn execute_searches(&mut self, time_manager: TimeManager, report: Report, shared: &Arc<SharedContext>) {
+        self.execute_searches_with_start_hook(time_manager, report, shared, || {});
+    }
+
+    /// Execute one synchronous search and invoke `on_started` after publishing
+    /// RUNNING but before worker search begins. The injected UCI listener uses
+    /// this boundary to avoid losing a stop that was queued immediately after
+    /// `go`; non-UCI callers use `execute_searches` above.
+    pub fn execute_searches_with_start_hook<F>(
+        &mut self, time_manager: TimeManager, report: Report, shared: &Arc<SharedContext>, on_started: F,
+    ) where
+        F: FnOnce(),
+    {
         shared.tt.increment_age();
 
         shared.nodes.reset();
         shared.tb_hits.reset();
         shared.soft_stop_votes.store(0, Ordering::Release);
         shared.status.set(Status::RUNNING);
+        on_started();
         shared.best_stats.iter().for_each(|x| {
             x.store((self.main_thread().previous_best_score + 32768) as u32, Ordering::Release);
         });
