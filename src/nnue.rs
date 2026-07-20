@@ -303,23 +303,31 @@ struct Parameters {
 // The NetHolder Derefs to Parameters, so all ~36 field access sites
 // (PARAMETERS.ft_piece_weights, PARAMETERS.l1_weights, etc.) compile unchanged.
 
-struct NetHolder(std::sync::OnceLock<&'static Parameters>);
+struct NetHolder(std::sync::atomic::AtomicPtr<Parameters>);
 
 impl std::ops::Deref for NetHolder {
     type Target = Parameters;
     #[inline]
     fn deref(&self) -> &Parameters {
-        self.0.get().expect("NNUE net not loaded — call rk_ffi_create with a valid network_path")
+        let p = self.0.load(std::sync::atomic::Ordering::Acquire);
+        assert!(
+            !p.is_null(),
+            "NNUE net not loaded — call rk_ffi_create with a valid network_path"
+        );
+        // SAFETY: non-null means load_network installed a fully initialised,
+        // heap-allocated Parameters. unload_network's safety contract (no
+        // live engine thread) guarantees no reader observes the pointer
+        // after it is freed.
+        unsafe { &*p }
     }
 }
 
-// SAFETY: NetHolder only ever holds an immutable &'static Parameters (created
-// by Box::leak) wrapped in OnceLock.  OnceLock is already Sync; the raw
-// &'static reference is Sync because Parameters is #[repr(C)] with no interior
-// mutability.
+// SAFETY: NetHolder hands out only shared references to an immutable
+// Parameters (#[repr(C)], no interior mutability); the pointer itself is
+// managed with atomic Acquire/Release ordering.
 unsafe impl Sync for NetHolder {}
 
-static PARAMETERS: NetHolder = NetHolder(std::sync::OnceLock::new());
+static PARAMETERS: NetHolder = NetHolder(std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()));
 
 /// Load the NNUE net from a raw byte slice.
 ///
@@ -363,10 +371,40 @@ pub fn load_network(bytes: &[u8]) -> Result<(), String> {
     }
     // All bytes are initialised; cast to the concrete type.
     let boxed: Box<Parameters> = unsafe { Box::from_raw(ptr as *mut Parameters) };
-    PARAMETERS
+    let raw = Box::into_raw(boxed);
+    match PARAMETERS.0.compare_exchange(
+        std::ptr::null_mut(),
+        raw,
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Acquire,
+    ) {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            // A net is already installed; free the fresh copy and keep the
+            // existing one (callers treat "already loaded" as continue).
+            unsafe { drop(Box::from_raw(raw)) };
+            Err("NNUE net already loaded".to_string())
+        }
+    }
+}
+
+/// Unload the NNUE net, freeing its ~60 MB allocation so a host app can
+/// return to its no-engine memory baseline between engine lifetimes.
+///
+/// # Safety
+///
+/// Callable ONLY while no engine thread is live: any thread still
+/// evaluating would read freed memory. The FFI layer upholds this by
+/// calling it from `rk_ffi_destroy` strictly after the engine thread has
+/// been joined — and never on the stuck-thread teardown path, where a
+/// detached thread may still touch the net.
+pub unsafe fn unload_network() {
+    let p = PARAMETERS
         .0
-        .set(Box::leak(boxed))
-        .map_err(|_| "NNUE net already loaded".to_string())
+        .swap(std::ptr::null_mut(), std::sync::atomic::Ordering::AcqRel);
+    if !p.is_null() {
+        drop(unsafe { Box::from_raw(p) });
+    }
 }
 
 #[repr(align(64))]

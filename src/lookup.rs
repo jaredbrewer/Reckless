@@ -10,10 +10,16 @@ static mut A: [Square; 0x2000] = [Square::None; 0x2000];
 static mut B: [Square; 0x2000] = [Square::None; 0x2000];
 
 pub fn initialize() {
-    unsafe {
+    // Once-guarded so a second engine lifetime in the same process is safe:
+    // init_cuckoo performs swap-insertion into the CUCKOO/A/B tables and can
+    // loop forever if re-run against already-populated tables. The tables
+    // stay resident across lifetimes (a few hundred KB — negligible next to
+    // the ~60 MB net, which IS unloaded between lifetimes).
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| unsafe {
         init_luts();
         init_cuckoo();
-    }
+    });
 }
 
 unsafe fn init_luts() {

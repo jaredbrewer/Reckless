@@ -40,6 +40,14 @@ static mut PIECE_OFFSET_LOOKUP: [[i32; 64]; 12] = [[0; 64]; 12];
 static mut ATTACK_INDEX_LOOKUP: [[[u8; 64]; 64]; 12] = [[[0; 64]; 64]; 12];
 
 pub fn initialize() {
+    // Once-guarded for a second engine lifetime in the same process: the
+    // writes below are idempotent, but guarding keeps every static-mut
+    // initializer on the same single-run contract as lookup::initialize.
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(initialize_tables);
+}
+
+fn initialize_tables() {
     #[rustfmt::skip]
     const PIECE_INTERACTION_MAP: [[i32; 6]; 6] = [
         [0,  1, -1,  2, -1, -1],

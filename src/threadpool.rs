@@ -19,6 +19,17 @@ pub struct ThreadPool {
     pub vector: Vec<Box<ThreadData>>,
 }
 
+// Join workers on drop: without this, dropping the pool detaches the worker
+// JoinHandles — the workers do exit on channel close without touching the
+// net, but the explicit join makes `nnue::unload_network()` provably safe
+// the moment the engine's message loop returns (no engine-owned thread can
+// outlive the pool).
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        self.workers.drain(..).for_each(WorkerThread::join);
+    }
+}
+
 impl ThreadPool {
     pub fn available_threads() -> usize {
         const MINIMUM_THREADS: usize = 512;
